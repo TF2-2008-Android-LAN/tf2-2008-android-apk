@@ -11,3 +11,6 @@ outputs/
 *.log
 __pycache__/
 .env
+
+# Do not publish historical editor snapshots from the original PC
+android-app/src/com/tf2008/updater/*.txt
