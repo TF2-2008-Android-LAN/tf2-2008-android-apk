@@ -1,0 +1,13 @@
+# Private signing keys and outputs
+*.jks
+*.keystore
+*.p12
+*.pem
+*.apk
+.gradle/
+build/
+outputs/
+*.partial
+*.log
+__pycache__/
+.env

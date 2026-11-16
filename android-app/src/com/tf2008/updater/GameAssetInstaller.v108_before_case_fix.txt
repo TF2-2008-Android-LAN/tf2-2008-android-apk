@@ -1,0 +1,377 @@
+package com.tf2008.updater;
+
+import android.content.ContentResolver;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.StatFs;
+import android.provider.DocumentsContract;
+import android.view.WindowManager;
+import java.io.*;
+import java.net.*;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.*;
+import java.util.zip.*;
+
+/**
+ * Private TF2 2008 install from the user's PC1 over the local network.
+ * No all-files access, hidden folders, device administrator or APK installation.
+ * Game launcher must be installed independently by the user.
+ *
+ * The archives are game data. They are verified against immutable SHA-256
+ * values prior to extraction, and only paths under srceng/tf_port, hl2,
+ * and platform are permitted.
+ */
+final class GameAssetInstaller {
+    private GameAssetInstaller(){}
+    private static final int BUFFER=65536;
+    private static final long RESERVE=192L*1024*1024;
+    private static final long MAX_UNCOMPRESSED=12L*1024*1024*1024;
+    private static final int MAX_ENTRIES=30000;
+    static final class PackageInfo {
+        final String name, route, checksum, root;
+        final long bytes;
+        final int maxEntries;
+        PackageInfo(String name,String route,String hash,String root,long size,int count){
+            this.name=name;this.route=route;this.checksum=hash;this.root=root;this.bytes=size;this.maxEntries=count;
+        }
+    }
+    private static final PackageInfo GAME=new PackageInfo(
+        "TF2 2008", "private_assets/tf_port.zip",
+        "ee0b5fb1d91163aa04c4d80d98ab87a440c35e7c375e91a14d71116f45e7c99c",
+        "tf_port",1417120238L,18500
+    );
+    private static final PackageInfo PATCH=new PackageInfo(
+        "Source Engine graphics","private_assets/source-universal-patch.zip",
+        "636671c2956532bd23be71a07ab3caf84f859687debfadf0866a4725a2e5e733",
+        "hl2",1217178453L,1100
+    );
+    static void diagnose(MainActivity a){
+        String[] check={
+            "tf_port/gameinfo.txt","tf_port/maps/ctf_2fort.bsp","tf_port/maps/cp_dustbowl.bsp","tf_port/maps/tc_hydro.bsp",
+            "hl2/hl2_misc_dir.vpk","hl2/hl2_misc_000.vpk","hl2/hl2_pak_dir.vpk","platform/resource/SourceScheme.res"
+        };
+        int seen=0;
+        for(String name:check){
+            try{
+                Uri uri=a.file(name,false);
+                boolean exists=uri!=null;
+                android.util.Log.i("TF2AssetCheck",name+"="+exists+" uri="+uri);
+                if(exists)seen++;
+            }catch(Exception e){android.util.Log.e("TF2AssetCheck",name+" ERROR",e);}
+        }
+        final int count=seen;
+        a.report(a.tx("Diagnóstico: "+count+"/8 recursos detectados.",
+                      "Diagnostic: "+count+"/8 assets detected."));
+    }
+    static boolean needsOriginal(MainActivity a) throws Exception {
+        return a.file("tf_port/gameinfo.txt",false)==null ||
+            a.file("tf_port/maps/ctf_2fort.bsp",false)==null ||
+            a.file("tf_port/maps/cp_dustbowl.bsp",false)==null ||
+            a.file("tf_port/maps/tc_hydro.bsp",false)==null;
+    }
+    static boolean needsGraphics(MainActivity a) throws Exception {
+        return a.file("hl2/hl2_misc_dir.vpk",false)==null ||
+            a.file("hl2/hl2_misc_000.vpk",false)==null ||
+            a.file("hl2/hl2_pak_dir.vpk",false)==null ||
+            a.file("platform/resource/SourceScheme.res",false)==null;
+    }
+    static boolean needsAnything(MainActivity a) throws Exception {
+        return needsOriginal(a)||needsGraphics(a);
+    }
+    static void ensure(MainActivity a,boolean repair) throws Exception {
+        if(!repair && !needsAnything(a))return;
+        // On new devices Android 11+ forbids choosing the storage volume root.
+        // We ask for srceng once using SAF rather than requesting dangerous
+        // MANAGE_EXTERNAL_STORAGE or bypassing Android's access controls.
+        String treeId=DocumentsContract.getTreeDocumentId(a.tree);
+        if(!treeId.endsWith(":srceng") && !treeId.equals("srceng"))
+            throw new IOException(a.tx(
+                "Elegí la carpeta «srceng» en el almacenamiento interno. Android no permite usar la carpeta raíz.",
+                "Choose the srceng folder in internal storage. Android does not permit selecting the storage root."
+            ));
+        a.runOnUiThread(()->a.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON));
+        try{
+            TreeWriter output=new TreeWriter(a);
+            if(repair || needsOriginal(a)){
+                a.report(a.tx("Descargando recursos originales de TF2 2008...",
+                              "Downloading original TF2 2008 assets..."));
+                File file=download(a,GAME);
+                extract(a,file,GAME,output,repair);
+                a.prefs.edit().putString("base_resources_sha",GAME.checksum).apply();
+                if(!file.delete())android.util.Log.w("TF2Setup","Couldn't delete temporary game archive");
+            }
+            if(repair || needsGraphics(a)){
+                a.report(a.tx("Descargando motor gráfico compatible...",
+                              "Downloading compatible graphics resources..."));
+                File file=download(a,PATCH);
+                extract(a,file,PATCH,output,repair);
+                a.prefs.edit().putString("graphics_resources_sha",PATCH.checksum).apply();
+                if(!file.delete())android.util.Log.w("TF2Setup","Couldn't delete temporary graphics archive");
+            }
+            if(needsAnything(a))throw new IOException(a.tx(
+                "Los recursos quedaron incompletos. Tocá Actualizar para retomar.",
+                "Resources are incomplete. Press Update to resume."
+            ));
+            a.report(a.tx("Recursos de TF2 2008 instalados. Aplicando controles...",
+                          "TF2 2008 resources installed. Applying controls..."));
+        }finally{
+            a.runOnUiThread(()->a.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON));
+        }
+    }
+    private static File download(MainActivity a,PackageInfo info) throws Exception {
+        File cache=new File(a.getExternalCacheDir()!=null?a.getExternalCacheDir():a.getCacheDir(),"tf2008");
+        if(!cache.exists()&&!cache.mkdirs())throw new IOException("Cannot create cache folder");
+        File tmp=new File(cache,info.name.equals("TF2 2008")?"original.part":"graphics.part");
+        File ready=new File(cache,info.name.equals("TF2 2008")?"original.verified.zip":"graphics.verified.zip");
+        if(ready.exists()){
+            if(ready.length()==info.bytes && digest(ready).equals(info.checksum))return ready;
+            if(!ready.delete())throw new IOException("Cannot discard invalid downloaded ZIP");
+        }
+        if(tmp.exists()&&tmp.length()>info.bytes && !tmp.delete())
+            throw new IOException("Cannot reset invalid partial ZIP");
+        long start=tmp.exists()?tmp.length():0;
+        long needed=info.bytes-start;
+        if(needed>0){
+            StatFs stats=new StatFs(cache.getAbsolutePath());
+            if(stats.getAvailableBytes()<needed+RESERVE)
+                throw new IOException(a.tx(
+                    "Falta espacio libre para descargar TF2 2008. Liberá almacenamiento y reintentá.",
+                    "Not enough free storage for TF2 2008. Free some space and try again."
+                ));
+        }
+        String url=a.serverAddress;
+        if(url==null||url.isEmpty())url="http://192.168.1.63:18868/";
+        if(!url.endsWith("/"))url+="/";
+        URL resource=new URL(url+info.route);
+        String scheme=resource.getProtocol();
+        if(!scheme.equals("http")&&!scheme.equals("https"))
+            throw new SecurityException("Unsupported download protocol");
+        HttpURLConnection connection=(HttpURLConnection)resource.openConnection();
+        connection.setConnectTimeout(10000);
+        connection.setReadTimeout(45000);
+        connection.setInstanceFollowRedirects(false);
+        connection.setRequestProperty("Accept-Encoding","identity");
+        if(start>0)connection.setRequestProperty("Range","bytes="+start+"-");
+        try{
+            int status=connection.getResponseCode();
+            if(start>0 && status==200){
+                start=0;
+                if(!tmp.delete())throw new IOException("Cannot reset partial download");
+            }else if(start>0 && status==206){
+                String contentRange=connection.getHeaderField("Content-Range");
+                if(contentRange==null||!contentRange.startsWith("bytes "+start+"-"))
+                    throw new IOException("Server returned invalid download range");
+            }else if(status!=200 && status!=206){
+                throw new IOException(a.tx("Servidor de recursos no disponible (HTTP ",
+                                            "Asset server unavailable (HTTP ")+status+")");
+            }else if(start==0 && status!=200){
+                throw new IOException("Unexpected HTTP "+status);
+            }
+            long progress=start;
+            long latestNotice=0;
+            try(InputStream in=connection.getInputStream();
+                OutputStream out=new BufferedOutputStream(new FileOutputStream(tmp,start>0))){
+                byte[] buf=new byte[BUFFER];int n;
+                while((n=in.read(buf))!=-1){
+                    out.write(buf,0,n);
+                    progress+=n;
+                    if(progress>info.bytes)throw new IOException("Download exceeds expected size");
+                    long now=android.os.SystemClock.elapsedRealtime();
+                    if(now-latestNotice>1100){
+                        latestNotice=now;
+                        int percent=(int)((progress*100)/info.bytes);
+                        a.report(a.tx("Descargando ","Downloading ")+info.name+": "+percent+"%");
+                    }
+                }
+            }
+        }finally{connection.disconnect();}
+        if(tmp.length()!=info.bytes)
+            throw new IOException(a.tx("Descarga incompleta; se retomará al reintentar.",
+                                        "Download incomplete; it will resume next time."));
+        a.report(a.tx("Verificando integridad de ","Checking integrity of ")+info.name+"...");
+        if(!digest(tmp).equals(info.checksum)){
+            if(!tmp.delete())android.util.Log.e("TF2Setup","Invalid archive could not be removed");
+            throw new SecurityException(a.tx("Archivo dañado o no corresponde a esta versión de TF2 2008.",
+                                              "Damaged file or wrong TF2 2008 version."));
+        }
+        if(!tmp.renameTo(ready))throw new IOException("Cannot mark verified ZIP");
+        return ready;
+    }
+    private static String digest(File path)throws Exception {
+        MessageDigest md=MessageDigest.getInstance("SHA-256");
+        try(InputStream in=new BufferedInputStream(new FileInputStream(path))){
+            byte[] buffer=new byte[BUFFER];int n;
+            while((n=in.read(buffer))!=-1)md.update(buffer,0,n);
+        }
+        return hex(md.digest());
+    }
+    private static String hex(byte[] data){
+        char[] digits="0123456789abcdef".toCharArray();char[] out=new char[data.length*2];int i=0;
+        for(byte b:data){int v=b&255;out[i++]=digits[v>>>4];out[i++]=digits[v&15];}
+        return new String(out);
+    }
+    private static boolean validPath(String p){
+        if(p==null||p.isEmpty()||p.startsWith("/")||p.startsWith("\\")||p.contains("\\")||
+            p.contains("..")||p.contains("//")||p.indexOf('\0')>=0||p.indexOf(':')>=0)return false;
+        if(!(p.startsWith("tf_port/")||p.startsWith("hl2/")||p.startsWith("platform/")))return false;
+        String low=p.toLowerCase(Locale.ROOT);
+        if(low.contains("/bin/")||low.endsWith(".exe")||low.endsWith(".dll")||
+           low.endsWith(".so")||low.endsWith(".bat")||low.endsWith(".cmd"))return false;
+        return true;
+    }
+    private static boolean protectUserFile(String path){
+        String p=path.toLowerCase(Locale.ROOT);
+        return p.equals("tf_port/cfg/config.cfg")||
+               p.equals("tf_port/cfg/autoexec.cfg")||
+               p.equals("tf_port/cfg/touch.cfg")||
+               p.equals("tf_port/resource/gamemenu.res")||
+               p.startsWith("tf_port/cfg/") && p.endsWith(".sav");
+    }
+    private static void extract(MainActivity a,File archive,PackageInfo info,TreeWriter output,boolean repair)throws Exception{
+        int count=0,written=0,skipped=0;
+        long bytes=0,reportedAt=0;
+        a.report(a.tx("Instalando ","Installing ")+info.name+"...");
+        try(ZipFile zip=new ZipFile(archive)){
+            Enumeration<? extends ZipEntry> entries=zip.entries();
+            while(entries.hasMoreElements()){
+                ZipEntry entry=entries.nextElement();
+                String p=entry.getName();
+                if(entry.isDirectory())continue;
+                if(!validPath(p))continue;
+                if(info==GAME && !p.startsWith("tf_port/"))continue;
+                if(info==PATCH && !(p.startsWith("hl2/")||p.startsWith("platform/")))continue;
+                if(++count>info.maxEntries||count>MAX_ENTRIES)throw new SecurityException("ZIP too many entries");
+                long entrySize=entry.getSize();
+                if(entrySize<0 || entrySize>1024L*1024*1024)throw new IOException("Invalid entry size "+p);
+                bytes+=entrySize;
+                if(bytes>MAX_UNCOMPRESSED)throw new IOException("Expanded game data too large");
+                TreeWriter.Existing existing=output.existing(p);
+                if(existing!=null && protectUserFile(p)){
+                    skipped++;continue;
+                }
+                if(existing!=null && existing.size==entrySize && (!repair || crcMatches(a,existing.uri,entry.getCrc()))){
+                    skipped++;continue;
+                }
+                Uri target=output.target(p,true);
+                long actual=0;
+                try(InputStream source=zip.getInputStream(entry);
+                    OutputStream dst=new BufferedOutputStream(a.getContentResolver().openOutputStream(target,"rwt"))){
+                    byte[] buf=new byte[BUFFER];int n;
+                    while((n=source.read(buf))!=-1){dst.write(buf,0,n);actual+=n;}
+                }
+                if(actual!=entrySize)throw new IOException("Incomplete write "+p);
+                written++;
+                long now=android.os.SystemClock.elapsedRealtime();
+                if(now-reportedAt>1000){
+                    reportedAt=now;
+                    a.report(a.tx("Instalando archivos: ","Installing files: ")+written+
+                             " ("+info.name+")");
+                }
+            }
+        }
+        if(count<50)throw new IOException("Archive contains too few expected entries");
+        a.report(a.tx("Verificados e instalados: ","Verified and installed: ")+info.name+
+                 " ("+written+" nuevos, "+skipped+" existentes)");
+    }
+    // Full repair streams every existing file against the original ZIP CRC.
+    // Normal update uses size and presence checks to avoid expensive I/O.
+    private static boolean crcMatches(MainActivity app,Uri target,long expected) throws Exception {
+        if(expected<0)return false;
+        java.util.zip.CRC32 crc=new java.util.zip.CRC32();
+        try(InputStream in=app.getContentResolver().openInputStream(target)){
+            if(in==null)return false;
+            byte[] data=new byte[BUFFER];int n;
+            while((n=in.read(data))!=-1)crc.update(data,0,n);
+        }
+        return crc.getValue()==expected;
+    }
+    private static final class TreeWriter {
+        final MainActivity app;
+        final Uri root;
+        final Map<String,Uri> folders=new HashMap<>();
+        final Map<String,Map<String,Existing>> indexes=new HashMap<>();
+        final String[] columns={
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_SIZE,
+            DocumentsContract.Document.COLUMN_MIME_TYPE
+        };
+        static final class Existing{
+            final Uri uri;final long size;final String mime;
+            Existing(Uri u,long s,String m){uri=u;size=s;mime=m;}
+        }
+        TreeWriter(MainActivity a)throws Exception{
+            app=a;root=a.root();folders.put("",root);
+        }
+        Map<String,Existing> index(String folder)throws Exception{
+            if(indexes.containsKey(folder))return indexes.get(folder);
+            Uri dir=folders.get(folder);
+            if(dir==null)throw new IOException("Missing game directory "+folder);
+            Uri children=DocumentsContract.buildChildDocumentsUriUsingTree(app.tree,DocumentsContract.getDocumentId(dir));
+            Map<String,Existing> result=new HashMap<>();
+            try(Cursor cursor=app.getContentResolver().query(children,columns,null,null,null)){
+                if(cursor==null)throw new IOException("No directory access "+folder);
+                while(cursor.moveToNext()){
+                    String id=cursor.getString(0),name=cursor.getString(1);
+                    long size=cursor.isNull(2)?-1:cursor.getLong(2);
+                    Uri u=DocumentsContract.buildDocumentUriUsingTree(app.tree,id);
+                    result.put(name,new Existing(u,size,cursor.getString(3)));
+                }
+            }
+            indexes.put(folder,result);
+            return result;
+        }
+        Uri directory(String parent,String name,boolean create)throws Exception{
+            String child=parent.isEmpty()?name:parent+"/"+name;
+            if(folders.containsKey(child))return folders.get(child);
+            Uri current=folders.get(parent);
+            Existing doc=index(parent).get(name);
+            if(doc!=null){
+                if(!DocumentsContract.Document.MIME_TYPE_DIR.equals(doc.mime))
+                    throw new IOException("File blocks folder "+child);
+                folders.put(child,doc.uri);return doc.uri;
+            }
+            if(!create)return null;
+            Uri dir=DocumentsContract.createDocument(app.getContentResolver(),current,
+                 DocumentsContract.Document.MIME_TYPE_DIR,name);
+            if(dir==null)throw new IOException("Can't create game folder "+child);
+            folders.put(child,dir);
+            index(parent).put(name,new Existing(dir,0,DocumentsContract.Document.MIME_TYPE_DIR));
+            return dir;
+        }
+        Existing existing(String rel)throws Exception{
+            String[] items=rel.split("/");
+            if(items.length<2)return null;
+            String folder="";
+            for(int i=0;i<items.length-1;i++){
+                Uri found=directory(folder,items[i],false);
+                if(found==null)return null;
+                folder=folder.isEmpty()?items[i]:folder+"/"+items[i];
+            }
+            return index(folder).get(items[items.length-1]);
+        }
+        Uri target(String rel,boolean create)throws Exception{
+            if(!validPath(rel))throw new SecurityException("Invalid path "+rel);
+            String[] items=rel.split("/");
+            String folder="";
+            for(int i=0;i<items.length-1;i++){
+                Uri found=directory(folder,items[i],create);
+                if(found==null)return null;
+                folder=folder.isEmpty()?items[i]:folder+"/"+items[i];
+            }
+            Existing doc=index(folder).get(items[items.length-1]);
+            if(doc!=null){
+                if(DocumentsContract.Document.MIME_TYPE_DIR.equals(doc.mime))
+                    throw new IOException("Folder blocks file "+rel);
+                return doc.uri;
+            }
+            if(!create)return null;
+            Uri newFile=DocumentsContract.createDocument(app.getContentResolver(),folders.get(folder),
+                 "application/octet-stream",items[items.length-1]);
+            if(newFile==null)throw new IOException("Can't write "+rel);
+            index(folder).put(items[items.length-1],new Existing(newFile,-1,"application/octet-stream"));
+            return newFile;
+        }
+    }
+}

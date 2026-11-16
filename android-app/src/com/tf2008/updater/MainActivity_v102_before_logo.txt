@@ -1,0 +1,402 @@
+package com.tf2008.updater;
+import android.app.*;
+import android.content.*;
+import android.database.Cursor;
+import android.graphics.Color;
+import android.net.Uri;
+import android.os.*;
+import android.provider.DocumentsContract;
+import android.view.*;
+import android.widget.*;
+import android.text.InputType;
+import org.json.*;
+import java.io.*;
+import java.net.*;
+import java.nio.charset.StandardCharsets;
+import java.security.*;
+import java.security.spec.*;
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.zip.*;
+
+public class MainActivity extends Activity {
+ static final int PICK_TREE=40,PICK_ZIP=41,MAX_OVERLAY=24000000;
+ static final String GAME="com.valvesoftware.source.tf_port",SERVER_DEFAULT="http://192.168.1.63:18868/";
+ final ExecutorService workers=Executors.newSingleThreadExecutor();
+ SharedPreferences prefs;
+ Uri tree;
+ String lang="es",pending="",serverAddress=SERVER_DEFAULT;
+ byte[] remoteM,remoteS,remoteZ;
+ boolean busy=false;
+ TextView title,folderLabel,status,subtitle,advancedLabel,serverLabel,footer,languageLabel;
+ Spinner language;
+ EditText serverInput;
+ Button pick,update,repair,check,importOriginal,play,advancedToggle;
+ LinearLayout layout,advancedBox;
+ String tx(String es,String en){return lang.equals("es")?es:en;}
+ void report(String s){runOnUiThread(()->status.setText(s));}
+ @Override public void onCreate(Bundle saved){
+  super.onCreate(saved);
+  prefs=getSharedPreferences("tf2008_update_prefs",0);
+  lang=prefs.getString("language","es");
+  serverAddress=prefs.getString("server",SERVER_DEFAULT);
+  String f=prefs.getString("tree","");
+  if(!f.isEmpty())try{tree=Uri.parse(f);}catch(Exception ignored){}
+  createUI();
+  labels();
+ }
+ TextView label(int size){TextView v=new TextView(this);v.setTextColor(Color.WHITE);v.setTextSize(size);v.setPadding(0,11,0,11);return v;}
+ Button button(Runnable action){Button b=new Button(this);b.setAllCaps(false);layout.addView(b);b.setOnClickListener(v->{if(!busy)action.run();});return b;}
+ void createUI(){
+  ScrollView scroll=new ScrollView(this);
+  scroll.setFillViewport(true);
+  scroll.setBackgroundColor(Color.rgb(23,26,32));
+  layout=new LinearLayout(this);
+  layout.setOrientation(LinearLayout.VERTICAL);
+  layout.setPadding(dp(22),dp(22),dp(22),dp(18));
+  scroll.addView(layout);
+  setContentView(scroll);
+  title=label(29);
+  title.setTypeface(null,1);
+  layout.addView(title);
+  subtitle=label(14);
+  subtitle.setTextColor(Color.rgb(180,187,197));
+  layout.addView(subtitle);
+  play=button(this::playGame);
+  play.setMinHeight(dp(65));
+  play.setTextSize(21);
+  play.setTypeface(null,1);
+  play.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(51,133,100)));
+  update=button(()->startUpdate(false));
+  update.setMinHeight(dp(59));
+  update.setTextSize(17);
+  update.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(54,87,143)));
+  languageLabel=label(16);
+  layout.addView(languageLabel);
+  language=new Spinner(this);
+  ArrayAdapter<String> adapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_item,new String[]{"Español (predeterminado)","English"});
+  adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+  language.setAdapter(adapter);
+  language.setSelection(lang.equals("es")?0:1);
+  layout.addView(language);
+  language.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener(){
+   public void onNothingSelected(android.widget.AdapterView<?> parent){}
+   public void onItemSelected(android.widget.AdapterView<?> parent,View selected,int index,long id){
+    String next=index==0?"es":"en";
+    if(!next.equals(lang)){
+     lang=next;
+     prefs.edit().putString("language",next).apply();
+     labels();
+     if(tree!=null){
+      report(tx("Aplicando el idioma...","Applying language..."));
+      saveServer();
+      runJob(()->install(true));
+     }else report(tx("Idioma elegido. Se aplicará al preparar el juego.",
+                    "Language selected. It will be applied during setup."));
+    }
+   }
+  });
+  status=label(14);
+  status.setTextColor(Color.rgb(174,223,193));
+  layout.addView(status);
+  advancedToggle=button(()->{
+   boolean show=advancedBox.getVisibility()!=View.VISIBLE;
+   advancedBox.setVisibility(show?View.VISIBLE:View.GONE);
+   advancedToggle.setText(show?tx("Ocultar opciones avanzadas","Hide advanced settings"):
+                               tx("Opciones avanzadas","Advanced settings"));
+  });
+  advancedToggle.setTextSize(13);
+  advancedBox=new LinearLayout(this);
+  advancedBox.setOrientation(LinearLayout.VERTICAL);
+  advancedBox.setVisibility(View.GONE);
+  layout.addView(advancedBox);
+  folderLabel=label(13);
+  advancedBox.addView(folderLabel);
+  pick=buttonIn(advancedBox,()->chooseTree(""));
+  repair=buttonIn(advancedBox,()->startUpdate(true));
+  check=buttonIn(advancedBox,()->{saveServer();runJob(()->checkServer(true));});
+  advancedLabel=label(14);
+  advancedBox.addView(advancedLabel);
+  importOriginal=buttonIn(advancedBox,this::chooseGameZip);
+  serverLabel=label(12);
+  advancedBox.addView(serverLabel);
+  serverInput=new EditText(this);
+  serverInput.setSingleLine(true);
+  serverInput.setTextColor(Color.WHITE);
+  serverInput.setTextSize(12);
+  serverInput.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_URI);
+  serverInput.setText(serverAddress);
+  advancedBox.addView(serverInput);
+  footer=label(12);
+  footer.setTextColor(Color.rgb(169,174,185));
+  advancedBox.addView(footer);
+  if(tree==null)report(tx("Primera instalación: tocá Actualizar. Android pedirá autorizar la carpeta del juego una sola vez.",
+                           "First setup: tap Update. Android will ask to authorize the game folder once."));
+  else report(tx("Configuración lista. Podés jugar o actualizar.","Ready to play or update."));
+ }
+ int dp(int value){return (int)(value*getResources().getDisplayMetrics().density+0.5f);}
+ Button buttonIn(LinearLayout root,Runnable action){
+  Button b=new Button(this);
+  b.setAllCaps(false);
+  root.addView(b);
+  b.setOnClickListener(v->{if(!busy)action.run();});
+  return b;
+ }
+ void labels(){
+  title.setText("TEAM FORTRESS 2");
+  subtitle.setText(tx("Versión 2008 · Android","2008 edition · Android"));
+  play.setText(tx("JUGAR","PLAY"));
+  update.setText(tx("ACTUALIZAR","UPDATE"));
+  languageLabel.setText(tx("Idioma del juego","Game language"));
+  advancedToggle.setText(advancedBox.getVisibility()==View.VISIBLE?
+      tx("Ocultar opciones avanzadas","Hide advanced settings"):
+      tx("Opciones avanzadas","Advanced settings"));
+  folderLabel.setText(tree==null?tx("Carpeta pendiente de autorizar","Folder not yet authorized"):
+                                tx("Carpeta del juego autorizada","Game folder authorized"));
+  pick.setText(tx("Cambiar carpeta del juego","Change game folder"));
+  repair.setText(tx("Reparar controles e idioma","Repair controls and language"));
+  check.setText(tx("Comprobar actualizaciones","Check for updates"));
+  advancedLabel.setText(tx("Instalación inicial (solo si faltan archivos)","Initial setup (only if files are missing)"));
+  importOriginal.setText(tx("Importar mi copia de recursos originales","Import my original game resources"));
+  serverLabel.setText(tx("Servidor de actualización (opcional)","Update server (optional)"));
+  footer.setText(tx("Solo requiere Internet y acceso a la carpeta elegida. No modifica Steam ni los gráficos.",
+                    "Uses Internet and access to the chosen folder only. Does not change Steam or graphics."));
+ }
+ void saveServer(){serverAddress=serverInput.getText().toString().trim();prefs.edit().putString("server",serverAddress).apply();}
+ void runJob(Runnable work){
+  if(busy)return;busy=true;
+  runOnUiThread(()->{update.setEnabled(false);repair.setEnabled(false);check.setEnabled(false);importOriginal.setEnabled(false);});
+  workers.execute(()->{
+   try{work.run();}catch(Throwable e){android.util.Log.e("TF2_2008_Updater","Task failure",e);report(tx("Error: ","Error: ")+e.getMessage());}
+   finally{busy=false;runOnUiThread(()->{update.setEnabled(true);repair.setEnabled(true);check.setEnabled(true);importOriginal.setEnabled(true);});}
+  });
+ }
+ void chooseTree(String next){
+  pending=next;
+  Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+  i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+  try { i.putExtra(DocumentsContract.EXTRA_INITIAL_URI,
+      DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:srceng")); }
+  catch(Exception ignored) { /* Other file providers may not expose the standard primary root. */ }
+  startActivityForResult(i,PICK_TREE);
+ }
+ void chooseGameZip(){
+  if(tree==null){chooseTree("import");return;}
+  Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.setType("*/*");i.addCategory(Intent.CATEGORY_OPENABLE);
+  startActivityForResult(i,PICK_ZIP);
+ }
+ void startUpdate(boolean force){
+  if(tree==null){
+   new AlertDialog.Builder(this)
+      .setTitle(tx("Preparar TF2 2008","Set up TF2 2008"))
+      .setMessage(tx("Por seguridad, Android te pedirá autorizar la carpeta srceng una sola vez. Vamos a abrirla directamente: tocá «Usar esta carpeta». Después se instalarán los controles y el idioma sin mover archivos manualmente.",
+                     "Android requires access to the srceng game folder once. We will open it directly: tap Use this folder. Controls and language will then install automatically."))
+      .setPositiveButton(tx("Continuar","Continue"),(dialog,which)->chooseTree(force?"repair":"update"))
+      .setNegativeButton(tx("Cancelar","Cancel"),null).show();
+   return;
+  }
+  saveServer();
+  if(force){
+   new AlertDialog.Builder(this)
+      .setTitle(tx("Reparar configuración","Repair settings"))
+      .setMessage(tx("Se restauran controles y textos de la versión base, guardando copia de los actuales. Los archivos del juego y gráficos no se tocan.",
+                     "Restores base controls and language with backups. Game assets and graphics stay untouched."))
+      .setPositiveButton(tx("Reparar","Repair"),(d,w)->runJob(()->install(true)))
+      .setNegativeButton(tx("Cancelar","Cancel"),null).show();
+  } else runJob(()->install(false));
+ }
+ @Override protected void onActivityResult(int req,int result,Intent data){
+  super.onActivityResult(req,result,data);
+  if(result!=RESULT_OK||data==null||data.getData()==null)return;
+  Uri uri=data.getData();
+  if(req==PICK_TREE){
+   try{
+    int flags=data.getFlags()&(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+    getContentResolver().takePersistableUriPermission(uri,flags);
+    tree=uri;prefs.edit().putString("tree",uri.toString()).apply();labels();
+    String next=pending;pending="";
+    if(next.equals("import"))chooseGameZip();
+    else if(next.equals("repair")||next.equals("update"))runJob(()->install(next.equals("repair")));
+    else report(tx("Carpeta seleccionada. Listo para actualizar.","Folder selected. Ready to update."));
+   }catch(Exception e){report("Folder permission: "+e.getMessage());}
+  } else if(req==PICK_ZIP)runJob(()->importZip(uri));
+ }
+ Uri root() throws Exception{
+  if(tree==null)throw new IOException("Choose srceng folder");
+  return DocumentsContract.buildDocumentUriUsingTree(tree,DocumentsContract.getTreeDocumentId(tree));
+ }
+ Uri child(Uri parent,String name,String mime,boolean create)throws Exception{
+  Uri listing=DocumentsContract.buildChildDocumentsUriUsingTree(tree,DocumentsContract.getDocumentId(parent));
+  String[] cols={DocumentsContract.Document.COLUMN_DOCUMENT_ID,DocumentsContract.Document.COLUMN_DISPLAY_NAME};
+  try(Cursor c=getContentResolver().query(listing,cols,null,null,null)){
+   if(c==null)throw new IOException("Folder read denied: "+parent);
+   while(c.moveToNext())if(name.equals(c.getString(1)))return DocumentsContract.buildDocumentUriUsingTree(tree,c.getString(0));
+  }
+  if(!create)return null;
+  Uri created=DocumentsContract.createDocument(getContentResolver(),parent,mime,name);
+  if(created==null)throw new IOException("Cannot create "+name);
+  return created;
+ }
+ Uri file(String rel,boolean create)throws Exception{
+  if(!rel.startsWith("tf_port/")||rel.startsWith("/")||rel.contains("..")||rel.indexOf('\\')>=0)throw new SecurityException("Invalid path "+rel);
+  String[] parts=rel.split("/");Uri d=root();
+  for(int i=0;i<parts.length-1;i++){d=child(d,parts[i],DocumentsContract.Document.MIME_TYPE_DIR,create);if(d==null)return null;}
+  return child(d,parts[parts.length-1],"application/octet-stream",create);
+ }
+ static byte[] read(InputStream in,int limit)throws Exception{
+  try(InputStream stream=in){ByteArrayOutputStream b=new ByteArrayOutputStream();byte[] buf=new byte[16384];int n,total=0;
+   while((n=stream.read(buf))!=-1){total+=n;if(total>limit)throw new IOException("File too large");b.write(buf,0,n);}return b.toByteArray();}
+ }
+ static byte[] readEntry(ZipInputStream in,int limit)throws Exception{
+  ByteArrayOutputStream b=new ByteArrayOutputStream();byte[] buf=new byte[8192];int n,total=0;
+  while((n=in.read(buf))!=-1){total+=n;if(total>limit)throw new IOException("Entry too large");b.write(buf,0,n);}return b.toByteArray();
+ }
+ byte[] asset(String name)throws Exception{return read(getAssets().open(name),MAX_OVERLAY);}
+ static String hash(byte[] data)throws Exception{
+  byte[] h=MessageDigest.getInstance("SHA-256").digest(data);StringBuilder b=new StringBuilder();
+  for(byte x:h)b.append(String.format(Locale.ROOT,"%02x",x&0xff));return b.toString();
+ }
+ void signed(byte[] data,byte[] sig)throws Exception{
+  PublicKey pub=KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(asset("public_key.der")));
+  Signature s=Signature.getInstance("SHA256withRSA");s.initVerify(pub);s.update(data);
+  if(!s.verify(sig))throw new SecurityException("Bad signature");
+ }
+ static byte[] download(String s,int limit)throws Exception{
+  URL url=new URL(s);
+  if(!url.getProtocol().equals("http")&&!url.getProtocol().equals("https"))throw new IOException("Invalid scheme");
+  HttpURLConnection c=(HttpURLConnection)url.openConnection();c.setConnectTimeout(4500);c.setReadTimeout(10000);c.setInstanceFollowRedirects(false);
+  try{if(c.getResponseCode()!=200)throw new IOException("HTTP "+c.getResponseCode());return read(c.getInputStream(),limit);}finally{c.disconnect();}
+ }
+ void checkServer(boolean show){
+  try{
+   String url=serverAddress.endsWith("/")?serverAddress:serverAddress+"/";
+   byte[] m=download(url+"manifest.json",160000),sig=download(url+"manifest.sig",2048);
+   signed(m,sig);
+   JSONObject j=new JSONObject(new String(m,StandardCharsets.UTF_8));
+   if(!j.getString("product").equals("TF2_2008_ANDROID"))throw new SecurityException("Wrong product");
+   String name=j.getString("archive");
+   if(name.contains("/")||name.contains("\\")||name.contains(".."))throw new SecurityException("Archive name");
+   byte[] z=download(url+name,MAX_OVERLAY);
+   if(!hash(z).equals(j.getString("archiveSha256"))||z.length!=j.getLong("archiveSize"))throw new SecurityException("Bad archive hash");
+   remoteM=m;remoteS=sig;remoteZ=z;
+   report(tx("Actualización verificada: ","Verified release: ")+j.getString("version"));
+  }catch(Exception e){
+   remoteM=remoteS=remoteZ=null;
+   if(show)report(tx("Servidor inaccesible; la versión incluida funciona sin conexión.","Server unavailable; bundled version works offline.")+" ("+e.getMessage()+")");
+  }
+ }
+ void install(boolean force){
+  try{
+   if(file("tf_port/gameinfo.txt",false)==null)throw new IOException(tx("Faltan recursos originales. Si ya tenés el juego, importá tu copia desde Opciones avanzadas.","Original game resources missing. Import your own copy from Advanced settings."));
+   report(tx("Verificando archivos de actualización...","Verifying update..."));
+   if(!force)checkServer(false);
+   byte[] m=remoteM!=null?remoteM:asset("manifest.json");
+   byte[] sig=remoteS!=null?remoteS:asset("manifest.sig");
+   byte[] zip=remoteZ!=null?remoteZ:asset("overlay.zip");
+   signed(m,sig);
+   JSONObject j=new JSONObject(new String(m,StandardCharsets.UTF_8));
+   if(!j.getString("product").equals("TF2_2008_ANDROID"))throw new SecurityException("Wrong product");
+   if(zip.length!=j.getLong("archiveSize")||!hash(zip).equals(j.getString("archiveSha256")))throw new SecurityException("Wrong ZIP digest");
+   JSONArray listed=j.getJSONArray("files");
+   HashMap<String,String> hashes=new HashMap<>();
+   for(int i=0;i<listed.length();i++){JSONObject q=listed.getJSONObject(i);hashes.put(q.getString("path"),q.getString("sha256"));}
+   HashMap<String,byte[]> zipFiles=new HashMap<>();
+   try(ZipInputStream zi=new ZipInputStream(new ByteArrayInputStream(zip))){
+    ZipEntry e;while((e=zi.getNextEntry())!=null){
+     if(e.isDirectory())continue;
+     String path=e.getName();
+     if(path.contains("..")||path.contains("\\")||!hashes.containsKey(path))throw new SecurityException("Unexpected "+path);
+     byte[] bytes=readEntry(zi,3*1024*1024);
+     if(!hash(bytes).equals(hashes.get(path)))throw new SecurityException("Bad file "+path);
+     zipFiles.put(path,bytes);
+     if(zipFiles.size()>100)throw new IOException("Too many assets");
+    }
+   }
+   if(zipFiles.size()!=listed.length())throw new SecurityException("Incomplete ZIP");
+   LinkedHashMap<String,byte[]> plan=new LinkedHashMap<>();
+   for(String p:new TreeSet<>(zipFiles.keySet())){
+    if(p.startsWith("common/"))plan.put(p.substring(7),zipFiles.get(p));
+    else if(p.startsWith("languages/"+lang+"/"))plan.put(p.substring(("languages/"+lang+"/").length()),zipFiles.get(p));
+   }
+   if(plan.size()<25)throw new IOException("Incomplete profile");
+   File backup=new File(getFilesDir(),"backups/"+new SimpleDateFormat("yyyyMMdd_HHmmss",Locale.ROOT).format(new Date()));
+   HashMap<String,byte[]> original=new HashMap<>();
+   ArrayList<String> done=new ArrayList<>();
+   int skip=0,unchanged=0;
+   for(Map.Entry<String,byte[]> ent:plan.entrySet()){
+    String name=ent.getKey();
+    Uri target=file(name,false);
+    byte[] old=target==null?null:read(getContentResolver().openInputStream(target),3*1024*1024);
+    // Never overwrite a player's custom autoexec settings.
+    if(name.endsWith("/autoexec.cfg")&&old!=null&&!Arrays.equals(old,ent.getValue())){skip++;continue;}
+    if(old!=null&&Arrays.equals(old,ent.getValue())){unchanged++;continue;}
+    original.put(name,old);
+    if(old!=null){
+     File dst=new File(backup,name);if(!dst.getParentFile().exists()&&!dst.getParentFile().mkdirs())throw new IOException("Backup folder");
+     try(FileOutputStream out=new FileOutputStream(dst)){out.write(old);}
+    }
+   }
+   try{
+    for(Map.Entry<String,byte[]> ent:plan.entrySet()){
+     String name=ent.getKey();
+     if(!original.containsKey(name))continue;
+     Uri u=file(name,true);
+     try(OutputStream out=getContentResolver().openOutputStream(u,"rwt")){if(out==null)throw new IOException("No write access "+name);out.write(ent.getValue());}
+     if(!hash(read(getContentResolver().openInputStream(u),3*1024*1024)).equals(hash(ent.getValue())))throw new IOException("Verify failed "+name);
+     done.add(name);
+     if(done.size()%5==0)report(tx("Aplicando: ","Applying: ")+done.size()+"/"+plan.size());
+    }
+   }catch(Exception error){
+    for(int i=done.size()-1;i>=0;i--){
+     String n=done.get(i);byte[] old=original.get(n);
+     try{
+      Uri target=file(n,false);
+      if(target==null)continue;
+      if(old==null)DocumentsContract.deleteDocument(getContentResolver(),target);
+      else try(OutputStream out=getContentResolver().openOutputStream(target,"rwt")){out.write(old);}
+     }catch(Exception ex){android.util.Log.e("TF2Update","Rollback issue "+n,ex);}
+    }
+    throw error;
+   }
+   prefs.edit().putString("installed_version",j.getString("version")).putString("installed_language",lang).apply();
+   report(tx("Listo: ","Complete: ")+done.size()+tx(" archivos aplicados, "," files applied, ")+unchanged+tx(" ya correctos, "," already correct, ")+skip+tx(" personales conservados. Reiniciá TF2."," user settings preserved. Restart TF2."));
+  }catch(Exception e){throw new RuntimeException(e.getMessage(),e);}
+ }
+ void importZip(Uri source){
+  int count=0;long bytes=0;
+  try(ZipInputStream zin=new ZipInputStream(getContentResolver().openInputStream(source))){
+   ZipEntry e;while((e=zin.getNextEntry())!=null){
+    if(e.isDirectory())continue;
+    String path=e.getName().replace('\\','/');
+    if(!path.startsWith("tf_port/")){
+     if(path.startsWith("materials/")||path.startsWith("models/")||path.startsWith("maps/")||path.startsWith("scripts/")||path.startsWith("resource/")||path.startsWith("sound/")||path.startsWith("particles/")||path.startsWith("cfg/"))path="tf_port/"+path;
+     else continue;
+    }
+    if(path.contains("..")||path.endsWith(".exe")||path.endsWith(".dll")||path.contains("/bin/"))continue;
+    if(++count>35000)throw new IOException("Too many files");
+    Uri dest=file(path,true);
+    try(OutputStream out=getContentResolver().openOutputStream(dest,"rwt")){
+     byte[] chunk=new byte[32768];int n;
+     while((n=zin.read(chunk))!=-1){bytes+=n;if(bytes>6L*1024*1024*1024)throw new IOException("Archive too large");out.write(chunk,0,n);}
+    }
+    if(count%150==0)report(tx("Importando: ","Importing: ")+count);
+   }
+   report(tx("Importados ","Imported ")+count+tx(" archivos. Ahora pulsá Actualizar."," files. Press Update next."));
+  }catch(Exception e){throw new RuntimeException("ZIP import after "+count+" files: "+e.getMessage(),e);}
+ }
+ void playGame(){
+  Intent intent=getPackageManager().getLaunchIntentForPackage(GAME);
+  if(intent==null){
+   new AlertDialog.Builder(this)
+       .setTitle(tx("Falta el juego","Game not installed"))
+       .setMessage(tx("Instalá primero el APK oficial de TF2 2008. Este actualizador no reemplaza el motor del juego.",
+                      "Install the TF2 2008 game APK first. This updater does not replace the engine."))
+       .setPositiveButton("OK",(d,w)->{}).show();
+   return;
+  }
+  if(tree==null){startUpdate(false);return;}
+  startActivity(intent);
+ }
+ @Override protected void onDestroy(){super.onDestroy();workers.shutdownNow();}
+}
