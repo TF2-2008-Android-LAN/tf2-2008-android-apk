@@ -676,7 +676,8 @@ public class MainActivity extends Activity {
    if(!selectedName.isEmpty())PlayerNameManager.apply(this,selectedName);
    // Restore faithful TF2 HUD backgrounds without unsupported PC-only shader effects.
    // Only replace unmodified original VMTs, leave custom HUD files untouched.
-   if(!overlayOnly)AndroidHudCompatInstaller.ensure(this);
+   AndroidHudCompatInstaller.ensure(this);
+   MobileControlsInstaller.ensure(this);
    // Normal updates and full repairs reinstall Spanish voices after the game files.
    // Quick "repair controls" deliberately remains fast, without large audio downloads.
    boolean spanishAudio=!overlayOnly&&VoicePackInstaller.ensure(this,repairAssets);
@@ -723,6 +724,7 @@ public class MainActivity extends Activity {
   runJob(()->{
    try{
     AndroidHudCompatInstaller.ensure(this);
+   MobileControlsInstaller.ensure(this);
     String name=prefs.getString("player_name","").trim();
     if(!name.isEmpty())PlayerNameManager.apply(this,name);
     runOnUiThread(()->{

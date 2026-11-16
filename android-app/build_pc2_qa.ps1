@@ -17,7 +17,7 @@ function CheckNative([string]$name){
 }
 Write-Output 'STEP 1/7 COMPILE_JAVA'
 $java=Get-ChildItem (Join-Path $project 'src\com\tf2008\updater') -Filter '*.java' -File|ForEach-Object {$_.FullName}
-& "$javaBin\javac.exe" -encoding UTF-8 -source 8 -target 8 -cp $androidJar -d $classes $java
+& "$javaBin\javac.exe" -encoding UTF-8 -Xlint:-options -source 8 -target 8 -cp $androidJar -d $classes $java
 CheckNative 'javac'
 Write-Output 'STEP 2/7 DEX'
 $classFiles=Get-ChildItem $classes -Filter '*.class' -Recurse -File|ForEach-Object {$_.FullName}
@@ -47,7 +47,7 @@ if(-not (Test-Path $keystore)){
  & "$javaBin\keytool.exe" -genkeypair -keystore $keystore -alias qa_bootstrap -keyalg RSA -keysize 3072 -validity 365 -storepass changeit -keypass changeit -dname 'CN=TF2 2008 Isolated QA, O=Local Test Only' -noprompt
  CheckNative 'keytool'
 }
-$out=Join-Path $project 'outputs\TF2_2008_Instalador_GitHub_HUD_v1.0.27_ISOLATED_QA.apk'
+$out=Join-Path $project 'outputs\TF2_2008_Instalador_GitHub_HUD_v1.0.28_ISOLATED_QA.apk'
 & "$bt\apksigner.bat" sign --ks $keystore --ks-key-alias qa_bootstrap --ks-pass pass:changeit --out $out $aligned
 CheckNative 'apksigner sign'
 & "$bt\apksigner.bat" verify --verbose $out
