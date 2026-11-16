@@ -14,10 +14,10 @@ import java.util.zip.*;
  *  Does not modify models or gameplay logic. */
 final class AndroidHudCompatInstaller {
  private AndroidHudCompatInstaller(){}
- static final String ARCHIVE="android_hud_compat_v1.zip";
- static final String INVENTORY="android_hud_compat_v1_manifest.json";
- static final String EXPECTED_SHA="ad1b72120fefa0e3d1e525219d4e2146bab13b17678b32f19000701d831fc3e8";
- static final long EXPECTED_SIZE=108814L;
+ static final String ARCHIVE="android_hud_compat_v2.zip";
+ static final String INVENTORY="android_hud_compat_v2_manifest.json";
+ static final String EXPECTED_SHA="94c77de9c8ac2c409f032ae867e8c1e91130853e61091c2885550df3e53226b8";
+ static final long EXPECTED_SIZE=196019L;
  private static final int MAX_ENTRY=1024*1024;
  private static final class FileItem {
   final String path,sha,baseSha;
@@ -37,7 +37,7 @@ final class AndroidHudCompatInstaller {
    throw new SecurityException("Android HUD bundle checksum failed");
   JSONObject inventory=new JSONObject(new String(activity.asset(INVENTORY),StandardCharsets.UTF_8));
   if(!"TF2_2008_ANDROID_HUD_COMPAT".equals(inventory.getString("product"))||
-     inventory.getInt("version")!=1||inventory.getInt("count")!=99)
+     inventory.getInt("version")!=2||inventory.getInt("count")!=111)
    throw new SecurityException("Invalid HUD inventory");
   JSONArray json=inventory.getJSONArray("files");
   HashMap<String,JSONObject> expected=new HashMap<>();
@@ -63,7 +63,7 @@ final class AndroidHudCompatInstaller {
        meta.optString("original_sha256",""),raw));
    }
   }
-  if(content.size()!=99)throw new SecurityException("Incomplete HUD bundle");
+  if(content.size()!=111)throw new SecurityException("Incomplete HUD bundle");
 
   ArrayList<FileItem> updates=new ArrayList<>();
   int kept=0,custom=0;
@@ -145,7 +145,7 @@ final class AndroidHudCompatInstaller {
  }
  private static boolean safePath(String path){
   if(path==null||path.length()>180||path.contains("..")||path.indexOf('\\')>=0||path.startsWith("/"))return false;
-  if(!path.startsWith("tf_port/materials/hud/"))return false;
+  if(!(path.startsWith("tf_port/materials/hud/")||path.startsWith("tf_port/materials/vgui/touch/")))return false;
   if(!(path.endsWith(".vmt")||path.endsWith(".vtf")))return false;
   return path.matches("^[a-zA-Z0-9_./-]+$");
  }

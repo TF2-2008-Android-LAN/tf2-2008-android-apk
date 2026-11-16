@@ -11,7 +11,7 @@ https://github.com/TF2-2008-Android-LAN/tf2-2008-android-resources
 - Respalda archivos originales y conserva modificaciones personales.
 
 ## Código fuente
-Carpeta android-app. Código de QA versión 1.0.26.
+Carpeta android-app. Código de QA versión 1.0.27.
 
 Se requieren JDK 17, Android Platform 36 y Build Tools 34. La secuencia
 android-app/build_pc2_qa.ps1 usa rutas de QA de PC2.
@@ -24,7 +24,8 @@ La clave de firma del actualizador antiguo NO está en este repositorio.
 Los builds con firma de QA no se instalan encima de la versión estable.
 
 ## Estado
-Parche de HUD de 40 VTF y 59 VMT comprobado en Samsung A34 jugando 2Fort
-con Heavy. Quedan seis iconos táctiles ausentes: crouch, jump, menu,
-reload, shoot y shoot_alt. La subida de archivos grandes y los
+Parche de HUD de 40 VTF + 59 VMT y seis pares VTF/VMT para controles táctiles comprobado en Samsung A34 jugando 2Fort
+con Heavy. Los seis iconos táctiles de menú, disparo, disparo alternativo, recarga,
+salto y agacharse ya están incluidos en el parche v2 (111 archivos).
+Probados en Samsung A34 en Heavy, Demoman, Engineer y Spy. La subida de archivos grandes y los
 ensayos completos de la versión pública siguen pendientes.
